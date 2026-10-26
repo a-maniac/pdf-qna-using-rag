@@ -1,13 +1,13 @@
 from pypdf import PdfReader
 from dotenv import load_dotenv
-load_dotenv()
-reader=PdfReader("sample-text-only-pdf-a4-size.pdf")
 import os
 from langchain_openai import ChatOpenAI
 from langchain_openai import OpenAIEmbeddings
 from qdrant_client import QdrantClient,models
 
+load_dotenv()
 llm_key=os.getenv("OPENROUTER_API_KEY")
+reader=PdfReader("sample-text-only-pdf-a4-size.pdf")
 
 llm=ChatOpenAI(
     model="deepseek/deepseek-v4.1-flash",
