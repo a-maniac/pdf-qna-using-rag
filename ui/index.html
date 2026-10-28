@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Document QnA</title>
+  <style>
+    :root {
+      --bg: #f6f7f9; --card: #fff; --text: #1d2330; --muted: #6b7280;
+      --border: #e3e6eb; --accent: #4f46e5; --accent-soft: #eef2ff; --err: #dc2626;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f1115; --card: #181b22; --text: #e6e8ec; --muted: #9aa1ad;
+        --border: #2a2f3a; --accent: #818cf8; --accent-soft: #1e2140; --err: #f87171;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: var(--bg); color: var(--text);
+    }
+    main { max-width: 760px; margin: 0 auto; padding: 40px 16px; }
+    h1 { margin: 0 0 4px; font-size: 24px; }
+    .sub { color: var(--muted); margin: 0 0 28px; }
+    .card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 12px; padding: 20px; margin-bottom: 16px;
+    }
+    .drop {
+      display: block; border: 2px dashed var(--border); border-radius: 10px;
+      padding: 28px; text-align: center; cursor: pointer; color: var(--muted);
+      transition: border-color .15s, background .15s;
+    }
+    .drop:hover, .drop.over { border-color: var(--accent); background: var(--accent-soft); }
+    .drop input { display: none; }
+    .status { margin-top: 12px; font-size: 14px; color: var(--muted); }
+    .status.ok { color: var(--accent); }
+    .status.err { color: var(--err); }
+    form.ask { display: flex; gap: 8px; }
+    input[type=text] {
+      flex: 1; padding: 11px 14px; border-radius: 8px; font: inherit;
+      border: 1px solid var(--border); background: var(--bg); color: var(--text);
+    }
+    input[type=text]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+    button {
+      padding: 0 18px; border: 0; border-radius: 8px; font: inherit; font-weight: 600;
+      background: var(--accent); color: #fff; cursor: pointer;
+    }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .answer { white-space: pre-wrap; }
+    .label { font-size: 12px; font-weight: 600; text-transform: uppercase;
+             letter-spacing: .05em; color: var(--muted); margin-bottom: 8px; }
+    details { border-top: 1px solid var(--border); padding: 10px 0; }
+    details:first-of-type { border-top: 0; }
+    summary { cursor: pointer; font-size: 14px; }
+    summary span { color: var(--muted); }
+    details p { white-space: pre-wrap; font-size: 13px; color: var(--muted); margin: 8px 0 0; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Document QnA</h1>
+  <p class="sub">Upload a PDF, then ask questions answered from its content.</p>
+
+  <section class="card">
+    <label class="drop" id="drop">
+      <input type="file" id="file" accept="application/pdf" />
+      <strong>Choose a PDF</strong> or drag it here
+    </label>
+    <div class="status" id="uploadStatus"></div>
+  </section>
+
+  <section class="card">
+    <form class="ask" id="askForm">
+      <input type="text" id="question" placeholder="Ask something about the document…" autocomplete="off" />
+      <button id="askBtn" disabled>Ask</button>
+    </form>
+    <div class="status" id="askStatus"></div>
+  </section>
+
+  <section class="card hidden" id="answerCard">
+    <div class="label">Answer</div>
+    <div class="answer" id="answer"></div>
+  </section>
+
+  <section class="card hidden" id="sourcesCard">
+    <div class="label">Retrieved chunks</div>
+    <div id="sources"></div>
+  </section>
+</main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const setStatus = (el, msg, cls = "") => { el.textContent = msg; el.className = "status " + cls; };
+
+  async function api(path, opts) {
+    const res = await fetch(path, opts);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || res.statusText);
+    return data;
+  }
+
+  function ready(name, chunks) {
+    setStatus($("uploadStatus"), `Indexed “${name}” — ${chunks} chunks`, "ok");
+    $("askBtn").disabled = false;
+    $("question").focus();
+  }
+
+  async function upload(file) {
+    if (!file) return;
+    $("askBtn").disabled = true;
+    setStatus($("uploadStatus"), `Indexing ${file.name}… (extracting, embedding, storing)`);
+    const body = new FormData();
+    body.append("file", file);
+    try {
+      const data = await api("/api/upload", { method: "POST", body });
+      ready(data.filename, data.chunks);
+    } catch (e) {
+      setStatus($("uploadStatus"), e.message, "err");
+    }
+  }
+
+  $("file").addEventListener("change", (e) => upload(e.target.files[0]));
+  const drop = $("drop");
+  ["dragenter", "dragover"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add("over"); }));
+  ["dragleave", "drop"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
+  drop.addEventListener("drop", (e) => upload(e.dataTransfer.files[0]));
+
+  $("askForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const question = $("question").value.trim();
+    if (!question) return;
+    $("askBtn").disabled = true;
+    setStatus($("askStatus"), "Thinking…");
+    try {
+      const data = await api("/api/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question }),
+      });
+      $("answer").textContent = data.answer;
+      $("sources").innerHTML = "";
+      data.sources.forEach((s) => {
+        const d = document.createElement("details");
+        d.innerHTML = `<summary>Chunk #${s.chunk_id} <span>· page ${s.page} · rerank ${s.rerank_score} · vector ${s.vector_score}</span></summary><p></p>`;
+        d.querySelector("p").textContent = s.text;
+        $("sources").appendChild(d);
+      });
+      $("answerCard").classList.remove("hidden");
+      $("sourcesCard").classList.remove("hidden");
+      setStatus($("askStatus"), "");
+    } catch (e) {
+      setStatus($("askStatus"), e.message, "err");
+    } finally {
+      $("askBtn").disabled = false;
+    }
+  });
+
+  api("/api/status").then((s) => s.filename && ready(s.filename, s.chunks)).catch(() => {});
+</script>
+</body>
+</html>

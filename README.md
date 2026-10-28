@@ -1,87 +1,89 @@
 # Document QnA with PDF RAG
 
-This project is a simple Retrieval-Augmented Generation (RAG) application for answering questions from a PDF file.
+This project is a Retrieval-Augmented Generation (RAG) application for answering questions from a PDF file.
 
 The system reads a PDF, extracts text, splits it into chunks, converts each chunk into an embedding, stores those embeddings in Qdrant, retrieves the most relevant chunks for a user question, and then sends that context to an LLM to generate the final answer.
 
-This repo is meant to be a practical beginner-friendly example of how a real document Q&A pipeline works in production-style architecture.
+The repo has two versions of the pipeline:
+
+| | `main.py` | `ui/` web app |
+|---|---|---|
+| How you use it | Script with a hard-coded PDF and question | Browser: upload any PDF, ask questions |
+| Chunking | Fixed 500-character slices | Recursive, token-sized chunks with page numbers |
+| Retrieval | Top 3 by vector similarity | Top 20 by vector similarity, reranked to top 3 |
+| Answer | Plain text | Text with page labels, plus the source chunks and their scores |
+| Qdrant collection | `rag_fundamentals_1` | `rag_ui` |
+
+`main.py` is the minimal, beginner-friendly version. The web app is where improvements from [advance_rag.md](advance_rag.md) are being added step by step.
 
 ## High-level flow
 
 ```mermaid
 flowchart TD
-    A[PDF file] --> B[pypdf: extract text]
-    B --> C[Chunk text into overlapping blocks]
+    A[PDF file] --> B[pypdf: extract text per page]
+    B --> C[Recursive chunking, tagged with page number]
     C --> D[Embed each chunk]
-    D --> E[Store vectors in Qdrant collection]
+    D --> E[Store vectors + payload in Qdrant]
     F[User question] --> G[Embed user query]
-    E --> H[Vector similarity search in Qdrant]
+    E --> H[Vector similarity search: top 20]
     G --> H
-    H --> I[Top matching chunks]
-    I --> J[Prompt LLM with retrieved context]
-    J --> K[Final answer]
+    H --> R[Cross-encoder reranker: top 3]
+    R --> J[Prompt LLM with page-labelled context]
+    J --> K[Answer + source chunks]
 ```
 
 ## Architecture diagram
 
 ```mermaid
 flowchart LR
-    subgraph Input
-        PDF[PDF Document]
-        Q[User Question]
+    subgraph Browser
+        UI[ui/index.html]
     end
 
-    subgraph Processing
-        Extract[Text Extraction]
-        Chunk[Chunking]
-        Embed[Embedding Model]
-        Store[Qdrant Vector Store]
+    subgraph Server["FastAPI (ui/server.py)"]
+        Upload["/api/upload"]
+        Ask["/api/ask"]
+        Rerank[bge-reranker-base]
     end
 
-    subgraph Retrieval
-        QueryEmbed[Embed Query]
-        Search[Semantic Search]
-        Context[Top Related Chunks]
+    subgraph External
+        OR[OpenRouter: embeddings + LLM]
+        QD[(Qdrant :6333)]
     end
 
-    subgraph Answer
-        LLM[LLM / Chat Model]
-        Final[Final Answer]
-    end
-
-    PDF --> Extract --> Chunk --> Embed --> Store
-    Q --> QueryEmbed --> Search
-    Store --> Search --> Context
-    Context --> LLM --> Final
+    UI --> Upload --> OR
+    Upload --> QD
+    UI --> Ask --> QD
+    Ask --> Rerank --> OR
+    Ask --> UI
 ```
 
-## What it does step by step
+## What the web app does step by step
 
-1. Reads the PDF file using `pypdf`
-2. Extracts text page by page
-3. Splits the text into small overlapping chunks
-4. Converts each chunk into a vector using an embedding model
-5. Stores those vectors in a Qdrant collection named `rag_fundamentals_1`
-6. Embeds the user question
-7. Searches Qdrant for the closest matching chunks
-8. Sends the retrieved chunks as context to the LLM
-9. Returns an answer grounded in the retrieved document content
+**Upload (`/api/upload`)**
+1. Reads the uploaded PDF with `pypdf`, page by page
+2. Splits each page into chunks of up to 500 tokens (75 overlap), breaking on paragraphs, then sentences, then words
+3. Tags each chunk with its page number and filename
+4. Embeds every chunk with `openai/text-embedding-3-small` (via OpenRouter)
+5. Replaces the `rag_ui` collection in Qdrant with the new chunks
 
-## Example flow
-
-```text
-PDF -> Page text -> Chunks -> Embeddings -> Qdrant
-                                             |
-User query -> Query embedding -> Similarity search -> Relevant chunks -> LLM answer
-```
+**Ask (`/api/ask`)**
+1. Embeds the question and fetches the 20 closest chunks from Qdrant
+2. Re-scores those 20 with a cross-encoder reranker (`BAAI/bge-reranker-base`) and keeps the best 3
+3. Builds the context with page labels like `[p. 8]` and asks the LLM (`deepseek/deepseek-v4.1-flash`)
+4. Returns the answer plus each source chunk's page, rerank score and vector score
 
 ## Project structure
 
-- `main.py` — the main pipeline script
-- `README.md` — project explanation and architecture overview
-- `.env` — environment configuration for API keys
+- `main.py` — the original pipeline script (basic RAG)
+- `ui/server.py` — FastAPI backend for the web app (improved RAG)
+- `ui/index.html` — single-page frontend: upload, ask, view answer and sources
+- `ui/README.md` — short run guide for the web app
+- `advance_rag.md` — improvement plan with drop-in code for `ui/server.py`, and progress
 - `sample-text-only-pdf-a4-size.pdf` — sample PDF used in the demo
-- `requirement.txt` — Python dependencies
+- `requirements.txt` — Python dependencies for both the script and the web app
+- `.env` — API key configuration (not committed)
+- `.vscode/settings.json` — points VS Code at `.venv` so autocomplete works
 
 ## Environment setup
 
@@ -91,15 +93,39 @@ Create a `.env` file in the project root:
 OPENROUTER_API_KEY=your_api_key_here
 ```
 
+Start Qdrant locally (needs Docker):
+
+```bash
+docker run -p 6333:6333 qdrant/qdrant
+```
+
 ## Install dependencies
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirement.txt
+pip install -r requirements.txt
 ```
 
-## Run the app
+`sentence-transformers` pulls in PyTorch, and the reranker model (~1 GB) downloads the first time the server starts.
+
+## Run
+
+**Web app**
+
+```bash
+source .venv/bin/activate
+uvicorn ui.server:app --reload
+```
+
+Open http://localhost:8000, upload a PDF and ask a question.
+
+- `--reload` restarts the server automatically when you save a `.py` file.
+- To stop it, press `Ctrl + C` in its terminal, or run `lsof -ti :8000 | xargs kill`.
+- If the page shows stale data after a change, hard-refresh with `Cmd + Shift + R`.
+- Uploaded documents are kept in Qdrant, but the server forgets which one is loaded when it restarts, so upload again after a restart.
+
+**Script**
 
 ```bash
 python main.py
@@ -107,61 +133,74 @@ python main.py
 
 ## Key code concepts
 
-### PDF extraction
+### PDF extraction (per page)
 
 ```python
-text = "\n".join(page.extract_text() or "" for page in reader.pages)
+pages = [page.extract_text() or "" for page in reader.pages]
 ```
 
-This combines all extracted page text into a single string.
+Text is kept per page, so each chunk can remember which page it came from.
 
 ### Chunking
 
 ```python
-return [text[i:i+size] for i in range(0, len(text), step)]
+splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+    chunk_size=500, chunk_overlap=75
+)
+for page_no, page_text in enumerate(pages, start=1):
+    for piece in splitter.split_text(page_text):
+        if piece.strip():
+            chunks.append({"text": piece, "page": page_no})
 ```
 
-This creates overlapping text segments so the model can work with smaller, more relevant blocks.
+Chunks are sized in tokens and split on natural boundaries (paragraphs → sentences → words), so they don't stop mid-word. Blank pieces are skipped. On the sample PDF this raised the best match score from 0.248 (fixed 500-character slices in `main.py`) to 0.408.
 
 ### Embedding generation
 
 ```python
-embeddings = embedding_model.embed_documents(chunks)
+embeddings = embedding_model.embed_documents([c["text"] for c in chunks])
 ```
 
-This converts each chunk into a vector representation that captures semantic meaning.
+This converts each chunk into a 1536-dimension vector that captures its meaning.
 
 ### Qdrant storage
 
 ```python
-qdrant.upsert(
-    collection_name=COLLECTION_NAME,
-    points=points
+models.PointStruct(
+    id=i,
+    vector=emb,
+    payload={"chunk_id": i, "filename": file.filename, **chunk},  # text + page
 )
 ```
 
-Each chunk gets stored as a vector with payload metadata such as the chunk text and index.
+Each chunk is stored as a vector, with its text, page number and filename in the payload.
 
-### Retrieval
+### Retrieval and reranking
 
 ```python
-ans = qdrant.query_points(
-    collection_name=COLLECTION_NAME,
-    query=embedded_user_query,
-    limit=3,
-    with_payload=True,
-).points
+candidates = qdrant.query_points(..., limit=20).points
+scores = reranker.predict([(question, c.payload["text"]) for c in candidates])
+ranked = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
 ```
 
-This retrieves the most relevant chunks for the current user question using vector similarity search.
+Vector search is fast but approximate. The cross-encoder reads the question and each chunk *together*, which is slower but more accurate, so it's only run on the top 20.
+
+Two different scores come back for each source:
+
+| Score | From | Scale |
+|---|---|---|
+| `vector_score` | Qdrant cosine similarity | about 0.2–0.5 for typical matches |
+| `rerank_score` | Cross-encoder | 0–1; high (> 0.5) only when a chunk directly answers the question |
+
+Don't reuse a cosine threshold for rerank scores. Broad questions like "what is the theme of the document?" get very low rerank scores (< 0.01) because no single chunk answers them. `retrieve_and_rerank()` accepts a `min_score` cutoff, but it's off by default.
 
 ### LLM answer generation
 
 ```python
-context = "\n\n".join(result.payload["text"] for result in ans)
+context = "\n\n".join(f"[p. {r.payload['page']}] {r.payload['text']}" for r, _ in results)
 ```
 
-The most relevant chunks are assembled into a context string and sent to the LLM for answer generation.
+The reranked chunks are labelled with their page numbers and sent to the LLM, which answers using only that context.
 
 ## Why this is useful
 
@@ -171,26 +210,21 @@ This pattern is the foundation of modern document Q&A systems:
 - reduce prompt size by selecting only the important chunks
 - ground the answer in the document instead of relying on model memory alone
 
-## Notes
+## Roadmap
 
-This is intentionally a simple implementation for learning and experimentation. In a production system, you would usually add:
+Improvements are tracked in [advance_rag.md](advance_rag.md), with code for each step.
 
-- better chunking strategies
-- metadata filtering
-- logging and monitoring
-- retry logic and error handling
-- vector indexing tuning
-- evaluation and benchmarking
-- a frontend or API layer
-
-## Next improvements
-
-- try different chunk sizes and overlap values
-- add metadata such as page numbers
-- use a larger or more specialized embedding model
-- build a web app or REST API around this pipeline
-- compare exact vs approximate retrieval strategies
+- [x] Recursive, token-based chunking with page metadata
+- [x] Reranker (retrieve 20, keep 3) with both scores shown in the UI
+- [x] Web UI and REST API
+- [ ] Score threshold and a reusable `dense_search`
+- [ ] System prompt with "I don't know" and page citations
+- [ ] Evaluation set (recall@k, MRR, faithfulness)
+- [ ] Hybrid search (dense + BM25)
+- [ ] Multiple documents, restore state after restart, background indexing
+- [ ] Chat history, streaming answers
+- [ ] Better PDF parsing, multi-query / HyDE, query routing
 
 ## Summary
 
-This project is a minimal end-to-end RAG pipeline for PDF Q&A. It shows the key idea clearly: store document chunks as vectors, search the most relevant chunks for a question, and ask the LLM to answer using that retrieved context.
+This project is an end-to-end RAG pipeline for PDF Q&A. `main.py` shows the core idea in its simplest form: store document chunks as vectors, search for the most relevant ones, and ask the LLM to answer from them. The web app builds on it with structure-aware chunking, page metadata and reranking, and is being extended step by step.

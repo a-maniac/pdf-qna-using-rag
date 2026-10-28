@@ -1,0 +1,16 @@
+# Core RAG pipeline (main.py and ui/server.py)
+pypdf
+python-dotenv
+langchain
+langchain_community
+langchain-openai
+langchain-text-splitters
+qdrant-client
+langchain-google-genai
+langchain-deepseek
+
+# Web app (ui/)
+fastapi
+uvicorn
+python-multipart
+sentence-transformers
